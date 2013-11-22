@@ -939,3 +939,78 @@ class Linear1dExtrapolator(object):
             return result
         else:
             return self._interpolator(requested_x)
+
+
+def circular_time(cube, times, method='nearest'):
+    """
+    Interpolate a cube representing a climatology in time, i.e. with circular time.
+
+    HGMT (Hilboll Groundhog Mean Time)
+             _______________________________________________
+            /                                               \
+        dec jan feb mar apr may jun jul aug sep oct nov dec jan
+        \_______________________________________________/
+
+
+    """
+    if method == 'nearest':
+        interp = extract_nearest_neighbour
+    elif method == 'linear':
+        interp = linear
+    else:
+        raise ValueError("Currently only the methods 'nearest' and 'lienar' "
+                "are supported. You passed %s".format(method))
+    # TODO: check if time coord doesn't span more than one year
+    # TODO: variable number of days per month, according to calendar
+    HGMT_OFFSET = 31  # Number of days.
+    # Assume that all time points are within the same year and ordered from January to December to make life simple.
+    time_coord = cube.coord('time')
+    cube_year = time_coord.units.num2date(time_coord.points[0]).year
+    time_dtype = time_coord.dtype
+    time_dim, = cube.coord_dims(time_coord)
+    time_units = time_coord.units
+
+    bounds = None
+    # TODO: construct circular time from actual time points, and not using fixed offset
+    points = np.concatenate([np.array([time_coord.points[0]], dtype=time_dtype) - HGMT_OFFSET,
+                             time_coord.points,
+                             np.array([time_coord.points[-1]], dtype=time_dtype) + HGMT_OFFSET])
+    if time_coord.has_bounds():
+        bounds = np.concatenate([np.array([time_coord.bounds[0]], dtype=time_dtype) - HGMT_OFFSET,
+                                          time_coord.bounds,
+                                          np.array([time_coord.bounds[-1]], dtype=time_dtype) + HGMT_OFFSET])
+
+    new_coord = time_coord.copy(points=points, bounds=bounds)
+
+    slice_pre = [slice(None)] * cube.ndim
+    slice_pre[time_dim] = -1
+    slice_post = [slice(None)] * cube.ndim
+    slice_post[time_dim] = 0
+    shape = [depth if dim != time_dim else 1 for dim, depth in enumerate(cube.shape)]
+
+    concatenate = ma.concatenate if ma.isMaskedArray(cube.data) else np.concatenate
+    new_data = concatenate([cube.data[slice_pre].reshape(shape),
+                            cube.data,
+                            cube.data[slice_post].reshape(shape)])
+
+    dim_coords_and_dims = []
+    for coord in cube.coords(dim_coords=True):
+        dim, = cube.coord_dims(coord)
+        if dim != time_dim:
+            dim_coords_and_dims.append((coord.copy(), dim))
+    dim_coords_and_dims.append((new_coord, time_dim))
+
+    aux_coords_and_dims = [(coord.copy(), cube.coord_dims(coord)) for coord in cube.coords(dim_coords=False)]
+
+    new_cube = iris.cube.Cube(new_data,
+                              dim_coords_and_dims=dim_coords_and_dims,
+                              aux_coords_and_dims=aux_coords_and_dims,
+                              **cube.metadata._asdict())
+
+    circular_points = [time_units.date2num(time.replace(year=cube_year)) for time in times]
+    circular_time = iris.coords.DimCoord(circular_points, long_name='circular_time', units=time_units)
+    sample = [('time', circular_time.points)]
+    interpolated_cube = interp(new_cube, sample)
+    interpolated_cube.add_aux_coord(circular_time, time_dim)
+    return interpolated_cube
+
